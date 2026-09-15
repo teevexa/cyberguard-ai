@@ -1,8 +1,17 @@
 {
-  "name": "vite_react_shadcn_ts",
+  "name": "cyberguard-ai",
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/teevexa/cyberguard-ai.git"
+  },
+  "homepage": "https://github.com/teevexa/cyberguard-ai#readme",
+  "bugs": {
+    "url": "https://github.com/teevexa/cyberguard-ai/issues"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

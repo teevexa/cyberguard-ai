@@ -1,10 +1,13 @@
 # CyberGuard AI — AI-Enhanced Cybersecurity Threat Detector
 
-[![CI](https://github.com/b3njaminbaya/cyberguard-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/b3njaminbaya/cyberguard-ai/actions/workflows/ci.yml)
+[![CI](https://github.com/teevexa/cyberguard-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/teevexa/cyberguard-ai/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
+An open-source project by [Teevexa Ltd](https://www.teevexa.com).
 
 A lightweight threat-detection dashboard for teams too small for an enterprise SIEM: ingest network traffic, score it for anomalies with a real trained ML model, get alerted over Slack/email/webhook, and get plain-language triage help from a locally-run AI assistant — no third-party API spend required.
 
-This is a personal/portfolio project, built incrementally in the open. This README always reflects what's actually implemented, not what's planned — see [Roadmap](#roadmap) for what's not built yet.
+Built incrementally in the open, started as a solo project and now maintained by Teevexa. This README always reflects what's actually implemented, not what's planned — see [Roadmap](#roadmap) for what's not built yet, and [CONTRIBUTING.md](CONTRIBUTING.md) if you'd like to help build it.
 
 ---
 
@@ -32,7 +35,7 @@ This is a personal/portfolio project, built incrementally in the open. This READ
 
 🟢 working · 🟡 partial · ⚪ not started
 
-**Log-source ingestion, honestly scoped:** the ML anomaly detector runs on UNSW-NB15 network *flow* data — it was never going to make sense to also claim it "detects threats" in free-text syslog lines, since that's a different data shape the model was never trained on. So `Logs` doesn't reuse the RandomForest model at all. Instead, `backend/syslog_server.py` is a real asyncio UDP listener (started via FastAPI's lifespan hook, default port 1514) that parses actual RFC 3164-ish syslog packets and flags them with simple, honest severity/keyword rules — a genuinely different, correctly-scoped detection approach for a genuinely different kind of data. It's also the one place multi-tenancy isn't real yet: plain UDP syslog has no per-org auth mechanism, so all syslog messages land in a bootstrap "default" organization rather than the sender's actual org.
+**Log-source ingestion, honestly scoped:** the ML anomaly detector runs on UNSW-NB15 network *flow* data — it was never going to make sense to also claim it "detects threats" in free-text syslog lines, since that's a different data shape the model was never trained on. So `Logs` doesn't reuse the RandomForest model at all. Instead, `backend/syslog_server.py` is a real asyncio UDP listener (started via FastAPI's lifespan hook, default port 1514) that parses actual RFC 3164-ish syslog packets and flags them with simple, honest severity/keyword rules — a genuinely different, correctly-scoped detection approach for a genuinely different kind of data. Plain UDP has no header to carry org identity, so a sender can optionally prepend a real per-org API key as a `[key:...]` token at the start of the message text (stripped before storage) to get routed to that org; no token, an unknown key, or a revoked one all fall back to a bootstrap "default" organization rather than dropping the message.
 
 **Multi-tenancy, built on the real thing:** rather than hand-rolling organizations/members/invitations, this uses Neon Auth's actual Better Auth `organization` plugin — confirmed live (not assumed from docs) that `neon_auth.organization`/`member`/`invitation` tables were already provisioned on this Neon Auth instance. Every domain table (`log_events`, `threats`, `incidents`, `notification_settings`, `app_settings`, `system_logs`) carries an `organization_id`; every endpoint resolves the caller's org from a real `X-Organization-Id` header, verified server-side against `neon_auth.member` — never trusted from the client. Org creation/switching and member invite/role/remove all call Neon Auth's real client methods directly (`backend/auth.py`'s `require_org_member`/`require_org_role`, `src/lib/OrgContext.tsx`).
 
@@ -55,7 +58,7 @@ This is a personal/portfolio project, built incrementally in the open. This READ
 └──────┘ └─────────┘ └──────────────────┘
 ```
 
-Deliberately **one backend service**, not a service-per-concern split: FastAPI owns the database, auth verification, the detection logic, and alert dispatch. Anomaly scoring uses classical, self-hosted ML (not an LLM call) because it needs to be cheap and fast on every ingested log line. Authentication is Neon Auth (Better Auth under the hood) — the frontend talks to it directly for sign-in/sign-up, and the backend verifies the resulting JWT statelessly via Neon's public JWKS endpoint (no shared secret, no Node runtime required on the Python side). The AI assistant is reserved for the low-volume, human-reviewed task of explaining an alert and suggesting next steps — runs locally via [Ollama](https://ollama.com) rather than a paid API, by design. The syslog UDP listener runs inside the same asyncio event loop as uvicorn (via a `lifespan` context manager) rather than as a separate process — one less thing to deploy and monitor for a single-operator portfolio deployment.
+Deliberately **one backend service**, not a service-per-concern split: FastAPI owns the database, auth verification, the detection logic, and alert dispatch. Anomaly scoring uses classical, self-hosted ML (not an LLM call) because it needs to be cheap and fast on every ingested log line. Authentication is Neon Auth (Better Auth under the hood) — the frontend talks to it directly for sign-in/sign-up, and the backend verifies the resulting JWT statelessly via Neon's public JWKS endpoint (no shared secret, no Node runtime required on the Python side). The AI assistant is reserved for the low-volume, human-reviewed task of explaining an alert and suggesting next steps — runs locally via [Ollama](https://ollama.com) rather than a paid API, by design. The syslog UDP listener runs inside the same asyncio event loop as uvicorn (via a `lifespan` context manager) rather than as a separate process — one less thing to deploy and monitor for a small, single-service deployment.
 
 See [`backend/`](backend/) for the API and [`src/`](src/) for the frontend.
 
@@ -218,8 +221,21 @@ Ordered by what unlocks the most, not by calendar date.
 
 ---
 
+## Contributing
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+dev setup, test requirements, and this project's one non-negotiable
+convention: nothing ships half-wired without an honest "not implemented
+yet" label. Please also read the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Security
+Found a vulnerability? Please report it privately — see [SECURITY.md](SECURITY.md)
+rather than opening a public issue.
+
 ## License
-MIT License. See `LICENSE` for details.
+Apache License 2.0. See `LICENSE` for details, and `NOTICE` for attribution.
+
+## Maintained by
+[Teevexa Ltd](https://www.teevexa.com)
 
 ## Contact
-b3njaminbaya@gmail.com
+teevexa@gmail.com
