@@ -24,6 +24,14 @@ FACILITY_NAMES = [
 ]
 
 _PRI_RE = re.compile(r"^<(?P<pri>\d{1,3})>(?:1\s+)?(?P<rest>.*)$", re.DOTALL)
+# Plain UDP syslog has no header field for auth/org routing, so a sender that
+# wants its messages attributed to a specific organization (rather than the
+# bootstrap default org) can prepend this token to the message text itself —
+# the same per-org API key already issued for POST /events/ingest (see
+# models.ApiKey / Settings > Organization > API Keys). Optional and stripped
+# from the stored message either way; an absent, unknown, or revoked token
+# just falls back to the default org rather than dropping the message.
+_ORG_KEY_RE = re.compile(r"^\[key:(?P<key>\S+)\]\s*(?P<rest>.*)$", re.DOTALL)
 _WITH_TIMESTAMP_RE = re.compile(
     r"^\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+(?P<host>\S+)\s+(?P<tag>[\w\-./]+?)(?:\[\d+\])?:\s*(?P<msg>.*)$",
     re.DOTALL,
@@ -61,6 +69,12 @@ def parse_syslog_line(raw: str) -> dict:
     else:
         host, tag, message = "unknown", None, rest
 
+    org_key = None
+    key_match = _ORG_KEY_RE.match(message)
+    if key_match:
+        org_key = key_match.group("key")
+        message = key_match.group("rest")
+
     flagged, reason = _classify(severity, message)
 
     return {
@@ -72,6 +86,7 @@ def parse_syslog_line(raw: str) -> dict:
         "raw": raw,
         "flagged": flagged,
         "flag_reason": reason,
+        "org_key": org_key,
     }
 
 

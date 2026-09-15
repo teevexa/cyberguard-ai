@@ -110,9 +110,9 @@ function UserDirectory() {
                     <Select
                       value={u.role}
                       onValueChange={(role) => updateRole.mutate({ id: u.id, role })}
-                      disabled={updateRole.isPending}
+                      disabled={u.id === me?.id || updateRole.isPending}
                     >
-                      <SelectTrigger className="w-40">
+                      <SelectTrigger className="w-40" title={u.id === me?.id ? "You can't change your own role" : undefined}>
                         <RoleBadge role={u.role} />
                       </SelectTrigger>
                       <SelectContent>

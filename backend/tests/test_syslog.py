@@ -1,8 +1,11 @@
 import socket
 import time
+from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy import text
 
+import main
 from models import SystemLog
 from syslog_server import SyslogProtocol, parse_syslog_line
 
@@ -41,6 +44,19 @@ def test_missing_pri_falls_back_to_reasonable_defaults():
     assert parsed["tag"] is None
     assert parsed["message"] == "just a bare log line with no structure at all"
     assert parsed["flagged"] is False
+
+
+def test_embedded_org_key_is_extracted_and_stripped_from_message():
+    parsed = parse_syslog_line("<14>web-01 sshd[1]: [key:cgai_abc123] Failed password for root")
+    assert parsed["org_key"] == "cgai_abc123"
+    assert parsed["message"] == "Failed password for root"
+    assert "[key:" not in parsed["message"]
+
+
+def test_no_embedded_key_leaves_org_key_none():
+    parsed = parse_syslog_line("<14>web-01 sshd[1]: Failed password for root")
+    assert parsed["org_key"] is None
+    assert parsed["message"] == "Failed password for root"
 
 
 def test_host_tag_message_without_timestamp():
@@ -127,15 +143,109 @@ def test_real_udp_packet_is_parsed_and_persisted(db_session):
     asyncio.run(_run())
 
     assert len(received) == 1
-    parsed = received[0]
+    parsed = dict(received[0])
     assert parsed["source_host"] == "test-host"
     assert parsed["flagged"] is True
 
+    parsed.pop("org_key", None)  # routing-only field, not a SystemLog column — see main._persist_syslog_message
     row = SystemLog(**parsed)
     db_session.add(row)
     db_session.commit()
     db_session.refresh(row)
     assert row.id is not None
+
+
+# ---------------------------------------------------------------------------
+# Org routing via an embedded API key (main._persist_syslog_message)
+# ---------------------------------------------------------------------------
+
+OTHER_ORG_ID = "00000000-0000-0000-0000-0000000000e2"
+
+
+def _make_other_org_with_key(db_session, admin_client):
+    """A second, distinct org (not the autouse default_org) with its own
+    real per-org API key — proves routing actually changes the destination
+    org, not just that it falls back to the same default either way."""
+    db_session.execute(
+        text('INSERT INTO neon_auth.organization (id, name, slug) VALUES (:id, :n, :s)'),
+        {"id": OTHER_ORG_ID, "n": "Other Org", "s": "other-org"},
+    )
+    db_session.commit()
+    user_id = "00000000-0000-0000-0000-0000000000e9"
+    db_session.execute(
+        text('INSERT INTO neon_auth."user" (id, email, role) VALUES (:id, :email, :role)'),
+        {"id": user_id, "email": "owner@other-org.test", "role": "user"},
+    )
+    db_session.execute(
+        text('INSERT INTO neon_auth.member (id, "organizationId", "userId", role) VALUES (gen_random_uuid(), :o, :u, :r)'),
+        {"o": OTHER_ORG_ID, "u": user_id, "r": "owner"},
+    )
+    db_session.commit()
+    # api_keys has no dependency_override path of its own to create through
+    # as this user, so insert directly the same way create_api_key does.
+    import hashlib
+    import secrets as secrets_mod
+
+    secret = f"cgai_{secrets_mod.token_urlsafe(32)}"
+    db_session.execute(
+        text(
+            'INSERT INTO api_keys (id, organization_id, name, key_prefix, key_hash, created_by_email, created_at, revoked) '
+            'VALUES (gen_random_uuid(), :org_id, :name, :prefix, :hash, :email, now(), false)'
+        ),
+        {
+            "org_id": OTHER_ORG_ID, "name": "syslog key", "prefix": secret[:12],
+            "hash": hashlib.sha256(secret.encode()).hexdigest(), "email": "owner@other-org.test",
+        },
+    )
+    db_session.commit()
+    return secret
+
+
+def _persist(raw_line: str) -> None:
+    parsed = parse_syslog_line(raw_line)
+    parsed["received_at"] = datetime.now(timezone.utc)
+    main._persist_syslog_message(parsed)
+
+
+def test_persist_routes_to_org_via_embedded_key(admin_client, db_session):
+    secret = _make_other_org_with_key(db_session, admin_client)
+    _persist(f"<14>web-01 sshd[1]: [key:{secret}] Failed password for root")
+
+    row = db_session.query(SystemLog).order_by(SystemLog.received_at.desc()).first()
+    assert row is not None
+    assert row.message == "Failed password for root"
+    assert row.organization_id == OTHER_ORG_ID
+
+
+def test_persist_falls_back_to_default_org_with_no_key(db_session, default_org):
+    _persist("<14>web-01 sshd[1]: Failed password for root")
+
+    row = db_session.query(SystemLog).order_by(SystemLog.received_at.desc()).first()
+    assert row is not None
+    assert row.organization_id == default_org
+
+
+def test_persist_falls_back_to_default_org_with_unknown_key(db_session, default_org):
+    _persist("<14>web-01 sshd[1]: [key:cgai_totally-made-up] Failed password for root")
+
+    row = db_session.query(SystemLog).order_by(SystemLog.received_at.desc()).first()
+    assert row is not None
+    assert row.organization_id == default_org
+
+
+def test_persist_falls_back_to_default_org_with_revoked_key(admin_client, db_session, default_org):
+    # Belongs to a *different* org than default_org, and is revoked — proves
+    # the fallback is a real "don't trust this key" decision, not a
+    # coincidence of both landing in the same org.
+    secret = _make_other_org_with_key(db_session, admin_client)
+    db_session.execute(text("UPDATE api_keys SET revoked = true WHERE organization_id = :org"), {"org": OTHER_ORG_ID})
+    db_session.commit()
+
+    _persist(f"<14>web-01 sshd[1]: [key:{secret}] Failed password for root")
+
+    row = db_session.query(SystemLog).order_by(SystemLog.received_at.desc()).first()
+    assert row is not None
+    assert row.organization_id == default_org
 
 
 # ---------------------------------------------------------------------------

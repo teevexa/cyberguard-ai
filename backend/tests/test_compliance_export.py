@@ -110,3 +110,36 @@ def test_export_itself_is_audit_logged(admin_client, admin_org_member, db_sessio
     row = db_session.query(AuditLog).filter(AuditLog.action == "compliance.exported").first()
     assert row is not None
     assert row.organization_id == admin_org_member.org_id
+
+
+def test_org_audit_event_requires_owner_or_admin(authed_client):
+    resp = authed_client.post("/organizations/audit-event", json={"action": "member.invited", "detail": "x@y.test"})
+    assert resp.status_code == 403
+
+
+def test_org_audit_event_rejects_unknown_action(admin_client):
+    resp = admin_client.post("/organizations/audit-event", json={"action": "member.did_something_unlisted"})
+    assert resp.status_code == 422  # closed enum — this endpoint records evidence, it doesn't accept free text
+
+
+def test_org_audit_event_is_recorded_and_exportable(admin_client, admin_org_member, db_session):
+    """Organization membership changes (invite/remove/role-change) happen
+    client-side against Neon Auth's own organization plugin and otherwise
+    never touch this backend — this endpoint is what makes them show up in
+    compliance export at all."""
+    resp = admin_client.post(
+        "/organizations/audit-event",
+        json={"action": "member.invited", "detail": "newperson@example.com as member"},
+    )
+    assert resp.status_code == 200
+
+    row = db_session.query(AuditLog).filter(AuditLog.action == "member.invited").first()
+    assert row is not None
+    assert row.organization_id == admin_org_member.org_id
+    assert row.actor_email == "admin@test.local"
+    assert "newperson@example.com" in row.detail
+
+    export = admin_client.get("/compliance/export")
+    zf = zipfile.ZipFile(io.BytesIO(export.content))
+    audit_rows = list(csv.DictReader(io.StringIO(zf.read("audit_log.csv").decode())))
+    assert any(r["action"] == "member.invited" for r in audit_rows)

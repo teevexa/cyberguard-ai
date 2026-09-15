@@ -83,6 +83,29 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Current
     return CurrentUser(id=user_id, email=row.email, role=row.role)
 
 
+def resolve_org_for_api_key(db: Session, raw_key: str) -> str | None:
+    """Hashes a raw per-org API key and resolves it to an organization id —
+    shared by require_ingest_key (HTTP) and the syslog listener's optional
+    embedded-key routing (backend/syslog_server.py), so both ingest paths
+    trust the exact same real, hashed-at-rest key store (models.ApiKey).
+    Returns None for an unknown key; raises 401 for a *revoked* one, since a
+    revoked key was once valid and its holder should get an explicit signal
+    rather than silent misrouting — callers that want silent fallback (the
+    syslog path, which can't 401 a UDP sender) should catch that themselves."""
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    row = db.execute(
+        text("SELECT organization_id, revoked FROM api_keys WHERE key_hash = :h"),
+        {"h": key_hash},
+    ).first()
+    if row is None:
+        return None
+    if row.revoked:
+        raise HTTPException(status_code=401, detail="This API key has been revoked")
+    db.execute(text("UPDATE api_keys SET last_used_at = now() WHERE key_hash = :h"), {"h": key_hash})
+    db.commit()
+    return str(row.organization_id)
+
+
 def require_ingest_key(request: Request, db: Session = Depends(get_db)) -> str:
     """Authenticates POST /events/ingest and resolves which organization the
     ingested event belongs to. Real per-org keys (backend/scripts or the
@@ -94,17 +117,9 @@ def require_ingest_key(request: Request, db: Session = Depends(get_db)) -> str:
     if not provided:
         raise HTTPException(status_code=401, detail="Missing X-API-Key")
 
-    key_hash = hashlib.sha256(provided.encode()).hexdigest()
-    row = db.execute(
-        text("SELECT organization_id, revoked FROM api_keys WHERE key_hash = :h"),
-        {"h": key_hash},
-    ).first()
-    if row is not None:
-        if row.revoked:
-            raise HTTPException(status_code=401, detail="This API key has been revoked")
-        db.execute(text("UPDATE api_keys SET last_used_at = now() WHERE key_hash = :h"), {"h": key_hash})
-        db.commit()
-        return str(row.organization_id)
+    org_id = resolve_org_for_api_key(db, provided)
+    if org_id is not None:
+        return org_id
 
     if INGEST_API_KEY and hmac.compare_digest(provided, INGEST_API_KEY):
         org_row = db.execute(text("SELECT id FROM neon_auth.organization WHERE slug = 'default'")).first()

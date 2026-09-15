@@ -5,7 +5,7 @@ from typing import Any
 import joblib
 import pandas as pd
 
-from .features import ALL_FEATURES, SEVERITY_BY_CATEGORY
+from .features import ALL_FEATURES, CATEGORICAL_FEATURES, SEVERITY_BY_CATEGORY
 
 MODEL_PATH = Path(__file__).parent / "model.joblib"
 EXPLAIN_PATH = Path(__file__).parent / "explainability.json"
@@ -28,6 +28,26 @@ def reload_model() -> None:
     _model = None
 
 
+def _coerce_feature_row(features: dict[str, Any]) -> dict[str, Any]:
+    """Real ingest clients (the public API, in particular) can't be trusted
+    to send a complete, well-typed 39-field payload every time. A missing or
+    malformed field shouldn't 500 the request — RandomForestClassifier can't
+    accept NaN/strings-where-numbers-expected, so fall back to a neutral
+    default per field, the same "never drop it, best-effort instead" choice
+    already made for syslog parsing (see syslog_server.py)."""
+    row: dict[str, Any] = {}
+    for key in ALL_FEATURES:
+        value = features.get(key)
+        if key in CATEGORICAL_FEATURES:
+            row[key] = value if isinstance(value, str) and value else "unknown"
+        else:
+            try:
+                row[key] = float(value) if value is not None else 0.0
+            except (TypeError, ValueError):
+                row[key] = 0.0
+    return row
+
+
 def score_event(features: dict[str, Any]) -> dict[str, Any]:
     """Score one log event's feature dict against the trained classifier.
 
@@ -35,7 +55,7 @@ def score_event(features: dict[str, Any]) -> dict[str, Any]:
     a severity bucket, and whether it should be recorded as a threat.
     """
     model = _get_model()
-    row = pd.DataFrame([{key: features.get(key) for key in ALL_FEATURES}])
+    row = pd.DataFrame([_coerce_feature_row(features)])
     proba = model.predict_proba(row)[0]
     classes = model.classes_
     best_idx = proba.argmax()

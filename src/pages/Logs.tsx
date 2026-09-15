@@ -72,6 +72,12 @@ export default function Logs() {
           Real RFC 3164 syslog messages received over UDP — send a test message with{" "}
           <code className="text-xs bg-muted px-1 py-0.5 rounded">logger -n 127.0.0.1 -P {stats.listening_port} "test message"</code>
         </p>
+        <p className="text-xs text-muted-foreground mt-1">
+          Plain UDP has no header to carry your organization — messages land here only if they embed one of this
+          org's API keys as <code className="bg-muted px-1 py-0.5 rounded">[key:...]</code> at the start of the
+          message text (see Settings &gt; Organization &gt; API Keys), otherwise they're attributed to the
+          deployment's default organization instead.
+        </p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">

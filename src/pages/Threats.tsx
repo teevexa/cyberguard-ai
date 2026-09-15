@@ -6,10 +6,10 @@ import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { LoadingState, ErrorState } from "@/components/QueryState"
-import { AlertTriangle, Search, Eye, Clock, Sparkles, Loader2, RotateCw, Gauge } from "lucide-react"
+import { AlertTriangle, Search, Eye, Clock, Sparkles, Loader2, RotateCw, Gauge, FilePlus2, Check } from "lucide-react"
 import { useThreats } from "@/hooks/useApi"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { api, ApiError, type ThreatDto } from "@/lib/api"
+import { api, ApiError, type IncidentInput, type ThreatDto } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
 
 function deviationLabel(zScore: number): { text: string; className: string } {
@@ -57,6 +57,52 @@ function WhyFlagged({ threatId }: { threatId: string }) {
         )
       })}
     </div>
+  )
+}
+
+/** The Incidents page's empty state says an incident can be opened "from a
+ * threat's details" — this is that action. Keyed by threat id from the
+ * caller so switching between threats resets the local "created" flag. */
+function CreateIncidentFromThreat({ threat }: { threat: ThreatDto }) {
+  const queryClient = useQueryClient()
+  const [created, setCreated] = useState(false)
+
+  const createIncident = useMutation({
+    mutationFn: (payload: IncidentInput) => api.createIncident(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["incidents"] })
+      setCreated(true)
+      toast({ title: "Incident created", description: "Linked to this threat — view it on the Incidents page." })
+    },
+    onError: (err: ApiError) => toast({ title: "Couldn't create incident", description: err.message, variant: "destructive" }),
+  })
+
+  if (created) {
+    return (
+      <Button variant="outline" size="sm" disabled>
+        <Check className="h-3 w-3 mr-1" />
+        Incident created
+      </Button>
+    )
+  }
+
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      disabled={createIncident.isPending}
+      onClick={() =>
+        createIncident.mutate({
+          title: `${threat.label} — ${threat.source_ip ?? "unknown"} → ${threat.dest_ip ?? "unknown"}`,
+          description: threat.summary ?? "",
+          severity: (threat.severity as IncidentInput["severity"]) ?? "medium",
+          threat_id: threat.id,
+        })
+      }
+    >
+      <FilePlus2 className="h-3 w-3 mr-1" />
+      {createIncident.isPending ? "Creating…" : "Create Incident"}
+    </Button>
   )
 }
 
@@ -232,6 +278,11 @@ export default function Threats() {
               <p>protocol: {selectedThreat.protocol}</p>
               <p>event_id: {selectedThreat.event_id}</p>
               <p>detected_at: {selectedThreat.created_at}</p>
+            </div>
+
+            <div className="border-t pt-4 flex items-center justify-between">
+              <span className="text-sm text-muted-foreground">Track this as an incident to assign, note, and work through a status.</span>
+              <CreateIncidentFromThreat key={selectedThreat.id} threat={selectedThreat} />
             </div>
 
             <div className="border-t pt-4 space-y-2">

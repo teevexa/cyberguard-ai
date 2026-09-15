@@ -33,6 +33,7 @@ from auth import (
     require_org_member,
     require_org_role,
     require_role,
+    resolve_org_for_api_key,
 )
 from database import SessionLocal, get_db
 from detection.predict import explain_event, get_feature_importance, reload_model, score_event
@@ -56,6 +57,7 @@ from schemas import (
     ModelMetricsOut,
     NotificationSettingsIn,
     NotificationSettingsOut,
+    OrgAuditEventIn,
     SeverityCounts,
     SummaryOut,
     SystemHealthOut,
@@ -81,12 +83,27 @@ SYSLOG_PORT = int(os.environ.get("SYSLOG_PORT", "1514"))
 def _persist_syslog_message(parsed: dict) -> None:
     """Called synchronously from the asyncio UDP protocol's datagram_received
     — opens its own session since there's no request to hang a DB dependency
-    off of here. UDP syslog has no per-org auth mechanism, so (like
-    /events/ingest) everything lands in the default org for now."""
+    off of here. Plain UDP has no header for auth/org routing, but a sender
+    can embed a real per-org API key as a "[key:...]" token at the start of
+    the message (see syslog_server._ORG_KEY_RE) to get routed to that org
+    instead of the bootstrap default — same trust store as /events/ingest's
+    X-API-Key. No token, an unknown key, or a revoked key all fall back to
+    the default org rather than dropping the message."""
     db = SessionLocal()
     try:
-        org_row = db.execute(text("SELECT id FROM neon_auth.organization WHERE slug = :slug"), {"slug": DEFAULT_ORG_SLUG}).first()
-        db.add(SystemLog(organization_id=str(org_row.id) if org_row else None, **parsed))
+        org_key = parsed.pop("org_key", None)
+        org_id: str | None = None
+        if org_key:
+            try:
+                org_id = resolve_org_for_api_key(db, org_key)
+            except HTTPException:
+                # Revoked key — there's no sender to hand a 401 to over UDP.
+                db.rollback()
+                org_id = None
+        if org_id is None:
+            org_row = db.execute(text("SELECT id FROM neon_auth.organization WHERE slug = :slug"), {"slug": DEFAULT_ORG_SLUG}).first()
+            org_id = str(org_row.id) if org_row else None
+        db.add(SystemLog(organization_id=org_id, **parsed))
         db.commit()
     except Exception:
         logger.exception("Failed to persist syslog message")
@@ -107,7 +124,9 @@ async def lifespan(app: FastAPI):
         logger.info("Syslog UDP listener started on port %d", SYSLOG_PORT)
     except OSError:
         logger.exception("Could not bind syslog UDP listener on port %d — log ingestion disabled", SYSLOG_PORT)
+    purge_task = asyncio.create_task(_retention_purge_loop())
     yield
+    purge_task.cancel()
     if transport is not None:
         transport.close()
 
@@ -143,6 +162,65 @@ MODEL_PATH = Path(__file__).parent / "detection" / "model.joblib"
 # per-org token in the message itself; out of scope for now, documented in
 # the README rather than silently pretended away.
 DEFAULT_ORG_SLUG = "default"
+
+RETENTION_CHECK_INTERVAL_SECONDS = int(os.environ.get("RETENTION_CHECK_INTERVAL_SECONDS", str(60 * 60)))
+
+
+def _purge_expired_data(db: Session) -> None:
+    """Enforces each organization's own app_settings.log_retention_days by
+    deleting ingested events/threats/logs older than the cutoff. A threat
+    still referenced by an incident is preserved regardless of age — an
+    incident's evidence trail (and the compliance export it feeds) must
+    outlive routine retention cleanup of raw ingested data. incident_notes/
+    incidents/audit_log are never touched here; retention only applies to
+    the raw, high-volume data it was actually meant for."""
+    orgs = db.execute(text("SELECT organization_id, log_retention_days FROM app_settings")).all()
+    for row in orgs:
+        if not row.log_retention_days or row.log_retention_days <= 0:
+            continue
+        cutoff = datetime.now(timezone.utc) - timedelta(days=row.log_retention_days)
+        threats_deleted = db.execute(
+            text(
+                "DELETE FROM threats WHERE organization_id = :org AND created_at < :cutoff "
+                "AND id NOT IN (SELECT threat_id FROM incidents WHERE threat_id IS NOT NULL)"
+            ),
+            {"org": row.organization_id, "cutoff": cutoff},
+        ).rowcount
+        events_deleted = db.execute(
+            text(
+                "DELETE FROM log_events WHERE organization_id = :org AND ts < :cutoff "
+                "AND id NOT IN (SELECT event_id FROM threats)"
+            ),
+            {"org": row.organization_id, "cutoff": cutoff},
+        ).rowcount
+        logs_deleted = db.execute(
+            text("DELETE FROM system_logs WHERE organization_id = :org AND received_at < :cutoff"),
+            {"org": row.organization_id, "cutoff": cutoff},
+        ).rowcount
+        db.commit()
+        if threats_deleted or events_deleted or logs_deleted:
+            record_audit(
+                db, str(row.organization_id), "system", "system.retention_purge",
+                f"{events_deleted} event(s), {threats_deleted} threat(s), {logs_deleted} log(s) "
+                f"deleted past the {row.log_retention_days}-day retention window",
+            )
+
+
+async def _retention_purge_loop() -> None:
+    """Runs alongside the syslog listener in the same event loop (started
+    from lifespan below) rather than as a separate cron/scheduler process —
+    consistent with this app's one-process-does-everything design. Never
+    lets one bad run kill the loop; the next tick tries again."""
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                _purge_expired_data(db)
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("Retention purge run failed")
+        await asyncio.sleep(RETENTION_CHECK_INTERVAL_SECONDS)
 
 
 def record_audit(db: Session, org_id: str | None, actor_email: str, action: str, detail: str = "") -> None:
@@ -653,6 +731,25 @@ def add_incident_note(
 
 
 # ---------------------------------------------------------------------------
+# Organization membership audit trail — invite/remove/role-change happen
+# client-side, straight against Neon Auth's real `organization` plugin (see
+# src/lib/OrgContext.tsx), so they never otherwise reach this backend. This
+# lets the frontend record that a real, already-successful membership change
+# happened, so GET /compliance/export actually captures it — the same
+# owner/admin gate as performing the change itself in the first place.
+# ---------------------------------------------------------------------------
+
+@app.post("/organizations/audit-event")
+def record_org_audit_event(
+    payload: OrgAuditEventIn,
+    db: Session = Depends(get_db),
+    member: OrgMember = Depends(require_org_role("owner", "admin")),
+):
+    record_audit(db, member.org_id, member.user.email, payload.action, payload.detail)
+    return {"status": "recorded"}
+
+
+# ---------------------------------------------------------------------------
 # Public API — per-organization ingest keys. Each key authenticates
 # POST /events/ingest and resolves which org an event belongs to (see
 # auth.require_ingest_key). Only the SHA-256 hash is ever stored; the raw
@@ -864,6 +961,12 @@ def update_user_role(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(require_role("Admin")),
 ):
+    if user_id == user.id:
+        # Same guard as update_user_ban below: an Admin who demotes themself
+        # with no other Admin around has no self-service way back in short
+        # of shell access to run promote_admin.py.
+        raise HTTPException(status_code=400, detail="You can't change your own role")
+
     row = db.execute(
         text('SELECT id, email, role, banned, "createdAt" AS created_at FROM neon_auth."user" WHERE id = :id'),
         {"id": user_id},

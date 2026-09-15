@@ -10,6 +10,7 @@ import { LoadingState, ErrorState } from "@/components/QueryState"
 import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts"
 import { Network as NetworkIcon, Activity, Shield, AlertTriangle, Globe, Server, Search } from "lucide-react"
 import { useEvents, useThreats } from "@/hooks/useApi"
+import { NetworkTopologyGraph } from "@/components/NetworkTopology"
 
 function formatBytes(bytes: number) {
   if (!bytes) return '0 B'
@@ -30,7 +31,9 @@ export default function Network() {
 
   const eventList = events.data!
   const threatList = threats.data!
-  const threatenedIps = new Set(threatList.flatMap(t => [t.source_ip, t.dest_ip]))
+  const threatenedIps = new Set(
+    threatList.flatMap(t => [t.source_ip, t.dest_ip]).filter((ip): ip is string => !!ip)
+  )
 
   const protocolCounts = computeProtocolCounts(eventList)
   const topTalkers = computeTopTalkers(eventList, threatenedIps)
@@ -209,15 +212,14 @@ export default function Network() {
           <Card>
             <CardHeader>
               <CardTitle>Network Topology</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                Host-to-host connections from the {eventList.length} flow record(s) above — node size by traffic
+                volume, red for a host that appears in a detected threat, capped to the top 24 hosts by traffic so
+                the layout stays readable. Hover a node for details.
+              </p>
             </CardHeader>
-            <CardContent className="flex items-center justify-center h-96">
-              <div className="text-center space-y-4">
-                <NetworkIcon className="h-16 w-16 mx-auto text-muted-foreground" />
-                <div>
-                  <p className="text-lg font-medium">Interactive Network Map</p>
-                  <p className="text-muted-foreground">Not built yet — would visualize host-to-host connections from flow data above.</p>
-                </div>
-              </div>
+            <CardContent>
+              <NetworkTopologyGraph events={eventList} flaggedIps={threatenedIps} />
             </CardContent>
           </Card>
         </TabsContent>
@@ -239,7 +241,7 @@ export function computeProtocolCounts(events: { protocol: string; bytes: number 
 
 export function computeTopTalkers(
   events: { source_ip: string; bytes: number }[],
-  flaggedIps: Set<string | null>
+  flaggedIps: Set<string>
 ) {
   const map = new Map<string, { ip: string; flows: number; bytes: number; flagged: boolean }>()
   for (const e of events) {

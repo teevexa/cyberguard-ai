@@ -229,6 +229,24 @@ class ApiKeyCreatedOut(ApiKeyOut):
     secret: str
 
 
+OrgAuditAction = Literal["member.invited", "member.removed", "member.role_changed"]
+
+
+class OrgAuditEventIn(BaseModel):
+    """Organization membership (invite/remove/role-change) is managed
+    client-side, directly against Neon Auth's own `organization` plugin —
+    see src/lib/OrgContext.tsx — so unlike every other admin action it never
+    otherwise touches our backend or its audit_log table. The frontend calls
+    this right after a real, successful membership change so compliance
+    export (GET /compliance/export) actually covers it. The action is a
+    closed enum, not free text — this endpoint records evidence of an
+    action that already happened elsewhere, it doesn't perform one, so it
+    must not become a place to write arbitrary audit-log entries."""
+
+    action: OrgAuditAction
+    detail: str = ""
+
+
 class SystemHealthOut(BaseModel):
     database_connected: bool
     model_trained: bool

@@ -24,8 +24,14 @@ import { getRealtimeEnabled, setRealtimeEnabled } from "@/lib/realtimePreference
 import { Users as UsersIcon, Trash2, FileDown } from "lucide-react"
 
 function NotificationsTab() {
-  const { user } = useAuth()
-  const isAdmin = user?.role === "Admin"
+  const { activeOrgRole } = useOrg()
+  // /settings/notifications is gated server-side by *org* role
+  // (owner/admin), not the site-wide role — matching that here, instead of
+  // the site-wide "Admin" check this used to use, fixes a real mismatch: an
+  // org owner who isn't a platform-wide Admin used to see this permanently
+  // disabled, while a platform Admin who's just a "member" of the active
+  // org used to see it enabled and then get a 403 on save.
+  const isAdmin = activeOrgRole === "owner" || activeOrgRole === "admin"
   const queryClient = useQueryClient()
   const { data, isPending, isError, error } = useQuery({
     queryKey: ["notification-settings"],
@@ -74,12 +80,13 @@ function NotificationsTab() {
         </CardTitle>
         <CardDescription>
           Real delivery — Slack via Incoming Webhook, email via SMTP, and a generic signed webhook. Saving and
-          testing requires the Admin role.
+          testing requires the owner or admin role within this organization.
         </CardDescription>
         {!isAdmin && (
           <div className="flex items-center gap-2 text-sm text-warning bg-warning/10 border border-warning/30 rounded-md px-3 py-2 mt-2">
             <Lock className="h-4 w-4 shrink-0" />
-            You're signed in as "{user?.role ?? "unknown"}" — an Admin needs to promote your account before you can change these settings.
+            You're a "{activeOrgRole ?? "member"}" in this organization — an owner or admin needs to grant you
+            access before you can change these settings.
           </div>
         )}
       </CardHeader>
@@ -255,8 +262,10 @@ function NotificationsTab() {
 }
 
 function GeneralTab() {
-  const { user } = useAuth()
-  const isAdmin = user?.role === "Admin"
+  const { activeOrgRole } = useOrg()
+  // Same fix as NotificationsTab — /settings/general is gated by org role
+  // server-side, not the site-wide role.
+  const isAdmin = activeOrgRole === "owner" || activeOrgRole === "admin"
   const queryClient = useQueryClient()
   const { data, isPending, isError, error } = useQuery({ queryKey: ["general-settings"], queryFn: api.generalSettings })
   const [form, setForm] = useState<AppSettingsInput | null>(null)
@@ -290,7 +299,7 @@ function GeneralTab() {
             {save.isPending ? "Saving…" : "Save Changes"}
           </Button>
         </CardTitle>
-        <CardDescription>Persisted for real — shared across everyone using this deployment.</CardDescription>
+        <CardDescription>Persisted for real — shared across everyone in this organization.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -328,7 +337,10 @@ function GeneralTab() {
               <SelectItem value="365">1 year</SelectItem>
             </SelectContent>
           </Select>
-          <p className="text-xs text-muted-foreground">Informational for now — nothing auto-deletes data past this yet.</p>
+          <p className="text-xs text-muted-foreground">
+            Enforced hourly: events, threats not linked to an open incident, and syslog messages older than this are
+            purged automatically.
+          </p>
         </div>
 
         <Separator />
@@ -422,7 +434,7 @@ function SecurityTab() {
           </div>
           <div className="flex items-center justify-between">
             <span className="text-sm">Event ingestion auth</span>
-            <Badge variant="outline">Shared API key (X-API-Key), constant-time compare</Badge>
+            <Badge variant="outline">Per-organization API key (X-API-Key), hashed at rest</Badge>
           </div>
         </div>
 
@@ -473,8 +485,10 @@ function ModelsTab() {
           </Button>
         </CardTitle>
         <CardDescription>
-          Retrain actually re-runs the RandomForest on the real UNSW-NB15 dataset and hot-swaps the live model —
-          not a simulated progress bar.
+          Retrain actually re-runs the RandomForest and hot-swaps the live model — not a simulated progress bar. It
+          trains on the same fixed UNSW-NB15 dataset with a fixed random seed each time, though, not on your
+          org's own ingested traffic, so results are deterministic: this demonstrates the retrain pipeline and lets
+          you recover after e.g. deleting <code>model.joblib</code>, it isn't continuous learning from live data.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
@@ -524,6 +538,18 @@ function ModelsTab() {
 function SystemTab() {
   const { user } = useAuth()
   const isAdmin = user?.role === "Admin"
+  const { activeOrgRole } = useOrg()
+  // The health stats below are genuinely deployment-wide (aggregate counts
+  // across every organization) and correctly require the site-wide Admin
+  // role, matching GET /system/health server-side. But "Reset Notification
+  // Settings" and "Factory Reset" are org-scoped actions gated server-side
+  // by *org* role (owner/admin, and owner-only for factory reset) — they
+  // used to be nested under the site-Admin-only gate too, which meant a
+  // real org owner who wasn't also a platform Admin could never even see
+  // this section, while a platform Admin who was merely a "member" of the
+  // active org would see enabled buttons that the backend would reject.
+  const canManageOrg = activeOrgRole === "owner" || activeOrgRole === "admin"
+  const isOrgOwner = activeOrgRole === "owner"
   const queryClient = useQueryClient()
   const { data, isPending, isError, error } = useQuery({
     queryKey: ["system-health"],
@@ -551,7 +577,7 @@ function SystemTab() {
     onError: (err: ApiError) => toast({ title: "Reset failed", description: err.message, variant: "destructive" }),
   })
 
-  if (!isAdmin) {
+  if (!isAdmin && !canManageOrg) {
     return (
       <Card>
         <CardHeader>
@@ -563,15 +589,13 @@ function SystemTab() {
         <CardContent>
           <div className="flex items-center gap-2 text-sm text-warning bg-warning/10 border border-warning/30 rounded-md px-3 py-2">
             <Lock className="h-4 w-4 shrink-0" />
-            You're signed in as "{user?.role ?? "unknown"}" — this deployment-wide system view requires the Admin role.
+            This requires either the platform Admin role (for deployment-wide health data) or the owner/admin role
+            within this organization (for the actions below).
           </div>
         </CardContent>
       </Card>
     )
   }
-
-  if (isPending) return <LoadingState label="Loading system info…" />
-  if (isError) return <ErrorState message={(error as Error).message} />
 
   return (
     <Card>
@@ -583,48 +607,58 @@ function SystemTab() {
         <CardDescription>Real health data — no fake CPU/memory sliders for infrastructure we don't control (serverless Postgres, no fixed connection pool to size).</CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-          <div className="flex items-center gap-2">
-            <Activity className="h-4 w-4 text-success" />
-            <div>
-              <p className="text-xs text-muted-foreground">Database</p>
-              <p className="text-sm font-medium">{data.database_connected ? "Connected" : "Down"}</p>
+        {isAdmin ? (
+          isPending ? (
+            <LoadingState label="Loading system info…" />
+          ) : isError ? (
+            <ErrorState message={(error as Error).message} />
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+              <div className="flex items-center gap-2">
+                <Activity className="h-4 w-4 text-success" />
+                <div>
+                  <p className="text-xs text-muted-foreground">Database</p>
+                  <p className="text-sm font-medium">{data.database_connected ? "Connected" : "Down"}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Clock className="h-4 w-4 text-primary" />
+                <div>
+                  <p className="text-xs text-muted-foreground">Uptime</p>
+                  <p className="text-sm font-medium">{Math.floor(data.uptime_seconds / 60)}m {Math.floor(data.uptime_seconds % 60)}s</p>
+                </div>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Log Level</p>
+                <p className="text-sm font-medium">{data.log_level}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Events Ingested</p>
+                <p className="text-sm font-medium">{data.total_events.toLocaleString()}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Threats Detected</p>
+                <p className="text-sm font-medium">{data.total_threats.toLocaleString()}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Incidents Tracked</p>
+                <p className="text-sm font-medium">{data.total_incidents.toLocaleString()}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Training Dataset</p>
+                <p className="text-sm font-medium">{data.dataset_rows?.toLocaleString() ?? "not downloaded"} rows</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Model Accuracy</p>
+                <p className="text-sm font-medium">{data.model_accuracy ? `${(data.model_accuracy * 100).toFixed(1)}%` : "untrained"}</p>
+              </div>
             </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Clock className="h-4 w-4 text-primary" />
-            <div>
-              <p className="text-xs text-muted-foreground">Uptime</p>
-              <p className="text-sm font-medium">{Math.floor(data.uptime_seconds / 60)}m {Math.floor(data.uptime_seconds % 60)}s</p>
-            </div>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Log Level</p>
-            <p className="text-sm font-medium">{data.log_level}</p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Events Ingested</p>
-            <p className="text-sm font-medium">{data.total_events.toLocaleString()}</p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Threats Detected</p>
-            <p className="text-sm font-medium">{data.total_threats.toLocaleString()}</p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Incidents Tracked</p>
-            <p className="text-sm font-medium">{data.total_incidents.toLocaleString()}</p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Training Dataset</p>
-            <p className="text-sm font-medium">{data.dataset_rows?.toLocaleString() ?? "not downloaded"} rows</p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Model Accuracy</p>
-            <p className="text-sm font-medium">{data.model_accuracy ? `${(data.model_accuracy * 100).toFixed(1)}%` : "untrained"}</p>
-          </div>
-        </div>
+          )
+        ) : (
+          <p className="text-sm text-muted-foreground">Deployment-wide health metrics require the platform Admin role.</p>
+        )}
 
-        {isAdmin && (
+        {canManageOrg && (
           <>
             <Separator />
             <div className="p-4 border border-warning/30 rounded-lg bg-warning/5">
@@ -642,22 +676,28 @@ function SystemTab() {
                       Reset Notification Settings
                     </Button>
                   </div>
-                  <div className="flex gap-2 items-center pt-2 border-t">
-                    <Input
-                      placeholder='Type "RESET" to confirm'
-                      value={confirmText}
-                      onChange={(e) => setConfirmText(e.target.value)}
-                      className="max-w-xs"
-                    />
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      disabled={confirmText !== "RESET" || factoryReset.isPending}
-                      onClick={() => factoryReset.mutate(confirmText)}
-                    >
-                      Factory Reset (wipe events/threats/incidents)
-                    </Button>
-                  </div>
+                  {isOrgOwner ? (
+                    <div className="flex gap-2 items-center pt-2 border-t">
+                      <Input
+                        placeholder='Type "RESET" to confirm'
+                        value={confirmText}
+                        onChange={(e) => setConfirmText(e.target.value)}
+                        className="max-w-xs"
+                      />
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        disabled={confirmText !== "RESET" || factoryReset.isPending}
+                        onClick={() => factoryReset.mutate(confirmText)}
+                      >
+                        Factory Reset (wipe events/threats/incidents)
+                      </Button>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground pt-2 border-t">
+                      Only this organization's owner can run a factory reset.
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
@@ -670,21 +710,22 @@ function SystemTab() {
 
 function OrganizationTab() {
   const { user } = useAuth()
-  const { activeOrg } = useOrg()
-  const queryClient = useQueryClient()
+  const {
+    activeOrg, members: data, isLoadingMembers: isPending, isMembersError: isError, membersError: error,
+    activeOrgRole, refetchMembers,
+  } = useOrg()
   const [inviteEmail, setInviteEmail] = useState("")
   const [inviteRole, setInviteRole] = useState<"member" | "admin">("member")
 
-  const { data, isPending, isError, error } = useQuery({
-    queryKey: ["org-members", activeOrg?.id],
-    queryFn: () => orgClient.organization.listMembers({ query: { organizationId: activeOrg!.id } }),
-    enabled: !!activeOrg,
-  })
+  const members = data
+  const canManage = activeOrgRole === "owner" || activeOrgRole === "admin"
 
-  const members = data?.data?.members ?? []
-  const myMembership = members.find((m) => m.userId === user?.id)
-  const canManage = myMembership?.role === "owner" || myMembership?.role === "admin"
-
+  // Better Auth's client methods resolve with {data, error} on failure
+  // rather than rejecting the promise — so onSuccess must check res.error
+  // itself, or a failed call (insufficient permission, stale id, network
+  // hiccup surfaced as a body instead of a throw) shows a false "success"
+  // toast while nothing actually happened. invite already checked this;
+  // removeMember/changeRole didn't, which was the actual bug.
   const invite = useMutation({
     mutationFn: () => orgClient.organization.inviteMember({ email: inviteEmail.trim(), role: inviteRole, organizationId: activeOrg!.id }),
     onSuccess: (res) => {
@@ -694,30 +735,44 @@ function OrganizationTab() {
       }
       setInviteEmail("")
       toast({ title: "Invitation sent", description: `${inviteEmail} can now accept an invite to join ${activeOrg?.name}.` })
+      api.recordOrgAuditEvent("member.invited", `${inviteEmail} as ${inviteRole}`).catch(() => {})
     },
+    onError: (err: Error) => toast({ title: "Invite failed", description: err.message, variant: "destructive" }),
   })
 
   const removeMember = useMutation({
     mutationFn: (memberIdOrEmail: string) =>
       orgClient.organization.removeMember({ memberIdOrEmail, organizationId: activeOrg!.id }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["org-members", activeOrg?.id] })
+    onSuccess: (res, memberIdOrEmail) => {
+      if (res.error) {
+        toast({ title: "Couldn't remove member", description: res.error.message, variant: "destructive" })
+        return
+      }
+      refetchMembers()
       toast({ title: "Member removed" })
+      api.recordOrgAuditEvent("member.removed", memberIdOrEmail).catch(() => {})
     },
+    onError: (err: Error) => toast({ title: "Couldn't remove member", description: err.message, variant: "destructive" }),
   })
 
   const changeRole = useMutation({
     mutationFn: ({ memberId, role }: { memberId: string; role: string }) =>
       orgClient.organization.updateMemberRole({ memberId, role: role as "member" | "admin" | "owner", organizationId: activeOrg!.id }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["org-members", activeOrg?.id] })
+    onSuccess: (res, vars) => {
+      if (res.error) {
+        toast({ title: "Couldn't update role", description: res.error.message, variant: "destructive" })
+        return
+      }
+      refetchMembers()
       toast({ title: "Role updated" })
+      api.recordOrgAuditEvent("member.role_changed", `${vars.memberId} -> ${vars.role}`).catch(() => {})
     },
+    onError: (err: Error) => toast({ title: "Couldn't update role", description: err.message, variant: "destructive" }),
   })
 
   if (!activeOrg) return <LoadingState label="Loading organization…" />
   if (isPending) return <LoadingState label="Loading members…" />
-  if (isError) return <ErrorState message={(error as Error).message} />
+  if (isError) return <ErrorState message={error?.message ?? "Couldn't load organization members."} />
 
   return (
     <div className="space-y-6">
@@ -734,7 +789,7 @@ function OrganizationTab() {
         {!canManage && (
           <div className="flex items-center gap-2 text-sm text-warning bg-warning/10 border border-warning/30 rounded-md px-3 py-2 mt-2">
             <Lock className="h-4 w-4 shrink-0" />
-            You're a "{myMembership?.role ?? "member"}" in this organization — only owners/admins can invite or manage members.
+            You're a "{activeOrgRole ?? "member"}" in this organization — only owners/admins can invite or manage members.
           </div>
         )}
       </CardHeader>

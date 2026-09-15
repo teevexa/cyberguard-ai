@@ -25,6 +25,16 @@ def test_non_admin_cannot_change_role(authed_client, regular_user):
     assert resp.status_code == 403
 
 
+def test_admin_cannot_change_own_role(admin_client, admin_user):
+    # Mirrors the self-ban guard below: an Admin demoting themself with no
+    # other Admin around has no self-service way back in.
+    resp = admin_client.patch(f"/users/{admin_user.id}/role", json={"role": "user"})
+    assert resp.status_code == 400
+
+    users = {u["email"]: u["role"] for u in admin_client.get("/users").json()}
+    assert users["admin@test.local"] == "Admin"  # unchanged, not just rejected in the response
+
+
 def test_admin_can_ban_and_unban_another_user(admin_client, regular_user):
     resp = admin_client.patch(f"/users/{regular_user.id}/ban", json={"banned": True})
     assert resp.status_code == 200

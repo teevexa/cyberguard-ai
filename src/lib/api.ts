@@ -293,4 +293,11 @@ export const api = {
   resetNotificationSettings: () => request<{ status: string }>("/settings/notifications/reset", { method: "POST" }),
   factoryReset: (confirm: string) =>
     request<{ status: string }>(`/system/factory-reset?confirm=${encodeURIComponent(confirm)}`, { method: "POST" }),
+  /** Organization membership (invite/remove/role-change) is managed
+   * client-side, straight against Neon Auth's own organization plugin — it
+   * never otherwise reaches this backend, so without this call those real
+   * actions are invisible to GET /compliance/export. Call only after the
+   * underlying Better Auth call actually succeeded. */
+  recordOrgAuditEvent: (action: "member.invited" | "member.removed" | "member.role_changed", detail = "") =>
+    request<{ status: string }>("/organizations/audit-event", { method: "POST", body: JSON.stringify({ action, detail }) }),
 }
