@@ -232,7 +232,7 @@ Found a vulnerability? Please report it privately — see [SECURITY.md](SECURITY
 rather than opening a public issue.
 
 ## License
-Apache License 2.0. See `LICENSE` for details, and `NOTICE` for attribution.
+Apache License 2.0. See [LICENSE](LICENSE) for details, and [NOTICE](NOTICE) for attribution.
 
 ## Maintained by
 [Teevexa Ltd](https://www.teevexa.com)
